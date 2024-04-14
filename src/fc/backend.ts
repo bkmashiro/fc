@@ -103,8 +103,8 @@ function CRUD<C extends { new (...args: any[]): {} }>(
   }
 }
 
-type RouteCtx<T extends {}, P extends keyof T & string> = {
-  foo: 'bar'
+type RouteCtx<T extends {}, P extends keyof T & string, Act extends Action> = {
+  payload: Payload<Act, T>
 
   error(message: string): void
 }
@@ -125,6 +125,7 @@ type DeletePayload<T> = {
 }
 type RawPayload<T> = {
   action: 'raw'
+  data: T
 }
 
 type PayloadType<T> =
@@ -135,13 +136,6 @@ type PayloadType<T> =
   | RawPayload<T>
 
 type Payload<A extends Action, T> = Extract<PayloadType<T>, { action: A }>
-
-type Hooks<
-  T extends {},
-  P extends keyof T & string,
-  D extends PropertyDescriptor,
-  Act extends Action,
-> = {}
 
 type RouteConfig<
   T extends {},
@@ -155,14 +149,33 @@ type RouteConfig<
   preRoute?(o: { req: T; res: any; next: () => void }): void
   transformPayload?(o: Payload<Act, any>): unknown
   postRoute?(o: { req: T; res: any }): void
-} & ThisType<RouteCtx<T, P>>
+} & ThisType<RouteCtx<T, P, Act>>
+type IsOptional<T, K extends keyof T> = {
+  [K1 in Exclude<keyof T, K>]: T[K1]
+} & { K?: T[K] } extends T
+  ? K
+  : never
+type OptionalKeys<T> = { [K in keyof T]: IsOptional<T, K> }[keyof T]
+type RequiredKeys<T> = Exclude<keyof T, OptionalKeys<T>>
+type LeftCommonKey<T, U> = {
+  // for optional keys
+  [K in OptionalKeys<T>]?: T[K]
+} & {
+  // for required keys
+  [K in RequiredKeys<T>]: T[K]
+}
 
 function Route<
   T extends {},
   F extends keyof T & string,
   P extends PropertyDescriptor,
   C extends {},
->(path: string, cfg?: C & RouteConfig<T, F, P, 'raw'>) {
+>(
+  path: string,
+  // we cannot prevent unknown properties to be added to cfg
+  // TODO: find ways to fix this.
+  cfg?: RouteConfig<T, F, P, 'raw'> & C,
+) {
   return function (target: T, propertyKey: F, descriptor: P) {
     setMeta(target, `routes.${propertyKey}.method`, 'POST')
     setMeta(target, `routes.${propertyKey}.path`, path)
@@ -246,10 +259,8 @@ class User {
   name: string
 
   @Route('/login', {
-    hooks: {
-      preRoute() {
-        this.error('something went wrong')
-      },
+    preRoute() {
+      this
     },
   })
   login(
