@@ -1,7 +1,9 @@
 import 'reflect-metadata'
 const util = require('util')
+import { setMeta, getMeta, fcMetadataKey } from './meta.helper'
+import { Param } from '@nestjs/common'
+import { Request, Response } from 'express'
 
-const fcMetadataKey = Symbol('fc')
 type Prettify<T> = {
   [K in keyof T]: T[K]
 } & {}
@@ -20,35 +22,6 @@ type ParameterDecorator = (
   propertyKey: string | symbol | undefined,
   parameterIndex: number,
 ) => void
-
-function setMeta(target: any, key: string, value: any) {
-  const path = `__meta__${key}`
-  const existingMeta = Reflect.getOwnMetadata(fcMetadataKey, target) || {}
-  // key is a dot separated path
-  const keys = key.split('.')
-  let current = existingMeta
-  for (let i = 0; i < keys.length - 1; i++) {
-    if (!current[keys[i]]) {
-      current[keys[i]] = {}
-    }
-    current = current[keys[i]] || {}
-  }
-  current[keys[keys.length - 1]] = value
-  Reflect.defineMetadata(fcMetadataKey, existingMeta, target)
-}
-
-function getMeta(target: any, key: string) {
-  const existingMeta = Reflect.getOwnMetadata(fcMetadataKey, target) || {}
-  const keys = key.split('.')
-  let current = existingMeta
-  for (let i = 0; i < keys.length; i++) {
-    if (!current[keys[i]]) {
-      return undefined
-    }
-    current = current[keys[i]]
-  }
-  return current
-}
 
 type InferTypeName<T> = T extends string
   ? 'string'
@@ -77,7 +50,7 @@ type PropConfig<T extends Record<string, any>, P extends keyof T> = {
 
 function Prop<T extends {}, P extends keyof T & string>(cfg: PropConfig<T, P>) {
   return function (target: T, propertyKey: P) {
-    setMeta(target, `fields.${propertyKey}`, cfg)
+    setMeta(target.constructor, `fields.${propertyKey}`, cfg)
   }
 }
 
@@ -97,16 +70,17 @@ function CRUD<C extends { new (...args: any[]): {} }>(
   cfg: Record<string, any>,
 ) {
   return function (target: C) {
-    console.log('CRUD', target.name, cfg)
-    const fields = collectProps(target)
-    setMeta(target, 'fields', fields)
+    // console.log('CRUD', target, target.name, cfg, fields)
+    setMeta(target, 'entity', target.name)
   }
 }
 
 type RouteCtx<T extends {}, P extends keyof T & string, Act extends Action> = {
-  payload: Payload<Act, T>
+  // payload: Payload<Act, T>
 
-  error(message: string): void
+  // error(message: string): void
+  req: Request
+  res: Response
 }
 
 type Method = 'GET' | 'POST' | 'PUT' | 'DELETE'
@@ -143,13 +117,14 @@ type RouteConfig<
   D extends PropertyDescriptor,
   Act extends Action,
 > = {
-  method?: Method
+  method: Method
   action?: Act
   path?: string
-  preRoute?(o: { req: T; res: any; next: () => void }): void
+  preRoute?(o): void
   transformPayload?(o: Payload<Act, any>): unknown
-  postRoute?(o: { req: T; res: any }): void
+  postRoute?(o): void
 } & ThisType<RouteCtx<T, P, Act>>
+
 type IsOptional<T, K extends keyof T> = {
   [K1 in Exclude<keyof T, K>]: T[K1]
 } & { K?: T[K] } extends T
@@ -157,16 +132,9 @@ type IsOptional<T, K extends keyof T> = {
   : never
 type OptionalKeys<T> = { [K in keyof T]: IsOptional<T, K> }[keyof T]
 type RequiredKeys<T> = Exclude<keyof T, OptionalKeys<T>>
-type LeftCommonKey<T, U> = {
-  // for optional keys
-  [K in OptionalKeys<T>]?: T[K]
-} & {
-  // for required keys
-  [K in RequiredKeys<T>]: T[K]
-}
 
 function Route<
-  T extends {},
+  T extends Object,
   F extends keyof T & string,
   P extends PropertyDescriptor,
   C extends {},
@@ -175,17 +143,63 @@ function Route<
   // we cannot prevent unknown properties to be added to cfg
   // TODO: find ways to fix this.
   cfg?: RouteConfig<T, F, P, 'raw'> & C,
-) {
+): MethodDecorator {
   return function (target: T, propertyKey: F, descriptor: P) {
-    setMeta(target, `routes.${propertyKey}.method`, 'POST')
-    setMeta(target, `routes.${propertyKey}.path`, path)
-    setMeta(target, `routes.${propertyKey}.config`, cfg || {}) //TODO: validate config
+    // setMeta(target.constructor, `routes.${propertyKey}.method`, 'POST')
+    setMeta(target.constructor, `routes.${propertyKey}.path`, path)
+    setMeta(target.constructor, `routes.${propertyKey}.config`, cfg || {}) //TODO: validate config
+
+    const param_names = ReflectParams(target[propertyKey])
+    param_names.forEach((param_name, idx) => {
+      setMeta(
+        target.constructor,
+        `routes.${propertyKey}.parameters.${idx}.name`,
+        param_name,
+      )
+    })
   }
+}
+
+export function ReflectParams(func: any) {
+  if (typeof func !== 'function') {
+    throw new Error('Expected function, got ' + typeof func)
+  }
+
+  const commentsRegex = /((\/\/.*$)|(\/\*[\s\S]*?\*\/))/gm
+
+  let funcString = func.toString().split(commentsRegex).join('')
+
+  let initialMatch = '('
+
+  if (/^class\s/.test(funcString)) {
+    initialMatch = 'constructor(' // match on constructor as matching just bracket will match functions declared before constructor
+  } else if (
+    /^[A-z]*[0-9]*\s*=>\s*/.test(funcString) &&
+    !funcString.startsWith('(')
+  ) {
+    return [funcString.split(/\s*=>\s*/)[0]] // handle arrow function of type arg => return others handled below
+  }
+
+  // grab bit in brackets of function
+  funcString = funcString.slice(
+    funcString.indexOf(initialMatch) + initialMatch.length,
+  )
+  funcString = funcString.slice(0, funcString.indexOf(')'))
+
+  const argsRegex = /([^\s*,]+)/g
+
+  const result = funcString.match(argsRegex)
+
+  if (result === null) {
+    return []
+  }
+
+  return result
 }
 
 function required(target: Object, propertyKey: string, parameterIndex: number) {
   setMeta(
-    target,
+    target.constructor,
     `routes.${propertyKey}.parameters.${parameterIndex}.required`,
     true,
   )
@@ -204,7 +218,7 @@ function expect<T, P extends keyof T & string, Idx extends number>(
 ) {
   return function (target: T, propertyKey: P, parameterIndex: Idx) {
     setMeta(
-      target,
+      target.constructor,
       `routes.${propertyKey}.parameters.${parameterIndex}.validator`,
       validator,
     )
@@ -249,9 +263,26 @@ function applyDecorators(...decorators: any[]) {
     )
   }
 }
+export type ParamConfig = {
+  required: boolean
+  validator?: (value: any) => boolean
+  name: string
+}
+export type CRUDMeta = {
+  entity: string
+  fields: Record<string, PropConfig<any, any>>
+  routes: Record<
+    string,
+    {
+      path: string
+      config: RouteConfig<any, any, any, any>
+      parameters: Record<string, ParamConfig>
+    }
+  >
+}
 
 @CRUD({})
-class User {
+export class User {
   @Prop({ type: 'number' })
   id: number
 
@@ -259,13 +290,14 @@ class User {
   name: string
 
   @Route('/login', {
-    preRoute() {
-      this
+    method: 'POST',
+    preRoute(o) {
+      console.log('preRoute', o, this.req.body)
     },
   })
   login(
     @required
-    @expect((s) => s.length > 0)
+    @expect((s) => s.length > 5)
     username: string,
     @required
     password: string,
@@ -277,8 +309,9 @@ class User {
 // debug
 // get fc metadata
 // console.log(util)
+
 console.log(
-  util.inspect(Reflect.getOwnMetadata(fcMetadataKey, User.prototype), {
+  util.inspect(Reflect.getOwnMetadata(fcMetadataKey, User), {
     showHidden: true,
     depth: null,
     colors: true,
