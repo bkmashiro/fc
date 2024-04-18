@@ -1,8 +1,7 @@
 import 'reflect-metadata'
-const util = require('util')
-import { setMeta, getMeta, fcMetadataKey } from './meta.helper'
-import { Param } from '@nestjs/common'
+import { setMeta, getMeta } from './meta.helper'
 import { Request, Response } from 'express'
+
 
 type Prettify<T> = {
   [K in keyof T]: T[K]
@@ -66,12 +65,28 @@ function collectProps(prototype: Function) {
   return props
 }
 
-function CRUD<C extends { new (...args: any[]): {} }>(
+function CRUD<C extends { new(...args: any[]): {} }>(
   cfg: Record<string, any>,
 ) {
   return function (target: C) {
     // console.log('CRUD', target, target.name, cfg, fields)
     setMeta(target, 'entity', target.name)
+  }
+}
+
+export function Action<
+  Act extends 'create' | 'read' | 'update' | 'delete' | 'raw',
+  T extends { new(...args: any[]): {} },
+>(
+  path: string,
+  cfg: RouteConfig<T, null, null, 'raw'>,
+  action: Act
+) {
+  return function (target: T) {
+    setMeta(target, `routes.${path}`, {
+      config: { ...cfg, action },
+      path,
+    })
   }
 }
 
@@ -115,10 +130,10 @@ type RouteConfig<
   T extends {},
   P extends keyof T & string,
   D extends PropertyDescriptor,
-  Act extends Action,
+  Act extends NoInfer<Action>,
 > = {
   method: Method
-  action?: Act
+  action?: Action
   path?: string
   preRoute?(o): void
   transformPayload?(o: Payload<Act, any>): unknown
@@ -148,7 +163,7 @@ function Route<
     // setMeta(target.constructor, `routes.${propertyKey}.method`, 'POST')
     setMeta(target.constructor, `routes.${propertyKey}.path`, path)
     setMeta(target.constructor, `routes.${propertyKey}.config`, cfg || {}) //TODO: validate config
-
+    setMeta(target.constructor, `routes.${propertyKey}.config.action`, 'raw')
     const param_names = ReflectParams(target[propertyKey])
     param_names.forEach((param_name, idx) => {
       setMeta(
@@ -281,39 +296,10 @@ export type CRUDMeta = {
   >
 }
 
-@CRUD({})
-export class User {
-  @Prop({ type: 'number' })
-  id: number
-
-  @Prop({ type: 'string' })
-  name: string
-
-  @Route('/login', {
-    method: 'POST',
-    preRoute(o) {
-      console.log('preRoute', o, this.req.body)
-    },
-  })
-  login(
-    @required
-    @expect((s) => s.length > 5)
-    username: string,
-    @required
-    password: string,
-  ) {
-    console.log('login', username, password)
-  }
+export {
+  CRUD,
+  Prop,
+  required,
+  Route,
+  expect,
 }
-
-// debug
-// get fc metadata
-// console.log(util)
-
-console.log(
-  util.inspect(Reflect.getOwnMetadata(fcMetadataKey, User), {
-    showHidden: true,
-    depth: null,
-    colors: true,
-  }),
-)
