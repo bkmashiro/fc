@@ -2,7 +2,14 @@ import { Injectable, Logger } from '@nestjs/common'
 import { CreateFcDto } from './dto/create-fc.dto'
 import { UpdateFcDto } from './dto/update-fc.dto'
 import { HttpAdapterHost } from '@nestjs/core'
-import { Express, json, RequestHandler, Router } from 'express'
+import {
+  Express,
+  json,
+  Request,
+  RequestHandler,
+  Response,
+  Router,
+} from 'express'
 import { CRUDMeta, ParamConfig } from './backend'
 import { getAllMeta } from './meta.helper'
 import { User } from './entities/fc.entity'
@@ -10,7 +17,7 @@ const util = require('util')
 
 const logger = new Logger('FcService')
 
-export interface CRUDProvider { }
+export interface CRUDProvider {}
 
 @Injectable()
 export class FcService {
@@ -28,7 +35,7 @@ export class FcService {
       create() {
         console.log('create')
         return { username: 'yajusenpai', password: '114514' }
-      }
+      },
     })
   }
 
@@ -56,7 +63,8 @@ export class FcService {
     router.stack.forEach((r) => {
       if (r.route && r.route.path) {
         logger.debug(
-          `Mapped {${route}${r.route.path
+          `Mapped {${route}${
+            r.route.path
           }}, ${r.route.stack[0].method.toUpperCase()}} route`,
         )
       }
@@ -64,7 +72,10 @@ export class FcService {
     this.express.use(route, router)
   }
 
-  configureEntity<T extends new (...args: any[]) => any>(entity: T, provider: CRUDProvider) {
+  configureEntity<T extends new (...args: any[]) => any>(
+    entity: T,
+    provider: CRUDProvider,
+  ) {
     const data = getAllMeta(entity) as CRUDMeta
 
     this.configureHandlers(entity, data, provider)
@@ -115,50 +126,55 @@ export class FcService {
     provider: CRUDProvider,
   ) {
     const routeMeta = meta.routes[routeName]
-    let fn: Function
-    const action = routeMeta.config.action
-    if (action === 'raw') {
-      fn = entity.prototype[routeName] as Function
-    } else {
-      fn = provider[action] as Function
-      if (!fn) {
-        throw new Error(
-          `action ${action} not found in provider`,
-        )
-      }
-    }
+    const {
+      config: { preRoute, postRoute },
+      parameters,
+    } = routeMeta
+    const fn = createFunction(routeMeta, entity, routeName, provider)
 
-    const paramValidators = Object.values(routeMeta.parameters || {}).map(
-      this.configureParam,
-    )
-    const handler = (req, res) => {
+    const paramValidators = this.configureParamValidators(routeMeta)
+    const reshape = this.getParamsReshaper(parameters)
+    const handler = (req: Request, res: Response) => {
       const errors = paramValidators.map((v) => v(req.body)).filter(Boolean)
       if (errors.length) {
         res.status(400).json({ errors })
       } else {
-        // preRoute
-        routeMeta.config?.preRoute?.call({ req, res })
+        preRoute?.call({ req, res })
 
-        // unwarp params according to order
-        const args = new Array().fill(
-          null,
-          //TODO move this outside handler, this
-          // can be calculated in advance
-          Object.keys(routeMeta.parameters || []).length,
-        )
-        for (const [idx, cfg] of Object.entries(routeMeta.parameters || [])) {
-          args[parseInt(idx)] = req.body[cfg.name]
-        }
+        const args = reshape(req.body)
+
         //TODO use context here
         const result = fn.call({ req, res }, ...args)
+
         res.json(result)
 
-        // postRoute
-        routeMeta.config?.postRoute?.call({ req, res, result })
+        postRoute?.call({ req, res, result })
       }
     }
 
     return handler
+  }
+
+  private getParamsReshaper(parameters: Record<string, ParamConfig>) {
+    const n_args = Object.keys(parameters || []).length
+
+    if (n_args === 0) {
+      return () => []
+    }
+
+    return (body: Record<string, any>) => {
+      const args = new Array().fill(null, n_args)
+      for (const [idx, cfg] of Object.entries(parameters || [])) {
+        args[parseInt(idx)] = body[cfg.name]
+      }
+      return args
+    }
+  }
+
+  private configureParamValidators<T extends new (...args: any[]) => any>(
+    routeMeta,
+  ) {
+    return Object.values(routeMeta.parameters || {}).map(this.configureParam)
   }
 }
 
@@ -167,7 +183,7 @@ export class RouterBuilder {
   pre_middlewares: RequestHandler[] = []
   post_middlewares: RequestHandler[] = []
 
-  constructor() { }
+  constructor() {}
   setRoute(method: string, path: string, handler: RequestHandler) {
     this.router[method.toLowerCase()](path, ...this.pre_middlewares, handler)
     return this
@@ -186,4 +202,22 @@ export class RouterBuilder {
   build() {
     return this.router
   }
+}
+function createFunction<T extends new (...args: any[]) => any>(
+  routeMeta,
+  entity: T,
+  routeName: string,
+  provider: CRUDProvider,
+) {
+  let fn: Function
+  const action = routeMeta.config.action
+  if (action === 'raw') {
+    fn = entity.prototype[routeName] as Function
+  } else {
+    fn = provider[action] as Function
+    if (!fn) {
+      throw new Error(`action ${action} not found in provider`)
+    }
+  }
+  return fn
 }
