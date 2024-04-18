@@ -10,14 +10,60 @@ import {
   Response,
   Router,
 } from 'express'
-import { CRUDMeta, ParamConfig } from './backend'
+import { CRUDMeta, ParamConfig, RouteMeta } from './backend'
 import { getAllMeta } from './meta.helper'
 import { User } from './entities/fc.entity'
+import {
+  CreateReq,
+  CreateRes,
+  DeleteReq,
+  DeleteRes,
+  PageRes,
+  ReadReq,
+  ReadRes,
+  UpdateReq,
+  UpdateRes,
+} from './crud.decl'
 const util = require('util')
 
 const logger = new Logger('FcService')
 
-export interface CRUDProvider {}
+export interface CRUDProvider<T> {
+  create(req: CreateReq<T>): CreateRes<T>
+  read(req: ReadReq<T>): ReadRes<T>
+  update(req: UpdateReq<T>): UpdateRes<T>
+  delete(req: DeleteReq<T>): DeleteRes<T>
+}
+class MockCRUDProvider implements CRUDProvider<User> {
+  repo: User[] = []
+  create(req: CreateReq<User>): CreateRes<User> {
+    console.log('create', this)
+    const { form } = req
+    this.repo.push(form)
+    return { row: form, rows_affected: 1 }
+  }
+  read(req: ReadReq<User>): PageRes<User> {
+    return { currentPage: 1, pageSize: 1, total: 1, records: this.repo }
+  }
+  update(req: UpdateReq<User>): UpdateRes<User> {
+    const { form } = req
+    const idx = this.repo.findIndex((r) => r.id === form.id)
+    if (idx === -1) {
+      return { row: form, rows_affected: 0 }
+    }
+    this.repo[idx] = form
+    return { row: form, rows_affected: 1 }
+  }
+  delete(req: DeleteReq<User>): DeleteRes<User> {
+    const { row } = req
+    const idx = this.repo.findIndex((r) => r.id === row.id)
+    if (idx === -1) {
+      return { rows_affected: 0 }
+    }
+    this.repo.splice(idx, 1)
+    return { rows_affected: 1 }
+  }
+}
 
 @Injectable()
 export class FcService {
@@ -31,12 +77,7 @@ export class FcService {
     )
     this.express.get('/fc', (req, res) => res.json({ message: 'Hello World' }))
 
-    this.configureEntity(User, {
-      create() {
-        console.log('create')
-        return { username: 'yajusenpai', password: '114514' }
-      },
-    })
+    this.configureEntity(User, new MockCRUDProvider())
   }
 
   create(createFcDto: CreateFcDto) {
@@ -74,7 +115,7 @@ export class FcService {
 
   configureEntity<T extends new (...args: any[]) => any>(
     entity: T,
-    provider: CRUDProvider,
+    provider: CRUDProvider<InstanceType<T>>,
   ) {
     const data = getAllMeta(entity) as CRUDMeta
 
@@ -84,7 +125,7 @@ export class FcService {
   configureHandlers<T extends new (...args: any[]) => any>(
     entity: T,
     meta: CRUDMeta,
-    provider: CRUDProvider,
+    provider: CRUDProvider<InstanceType<T>>,
   ) {
     for (const [routeName, routeMeta] of Object.entries(meta.routes)) {
       const handler = this.configureRoute(entity, meta, routeName, provider)
@@ -123,11 +164,11 @@ export class FcService {
     entity: T,
     meta: CRUDMeta,
     routeName: string,
-    provider: CRUDProvider,
+    provider: CRUDProvider<InstanceType<T>>,
   ) {
     const routeMeta = meta.routes[routeName]
     const {
-      config: { preRoute, postRoute },
+      config: { preRoute, postRoute, raw_input = false },
       parameters,
     } = routeMeta
     const fn = createFunction(routeMeta, entity, routeName, provider)
@@ -141,10 +182,17 @@ export class FcService {
       } else {
         preRoute?.call({ req, res })
 
-        const args = reshape(req.body)
-
-        //TODO use context here
-        const result = fn.call({ req, res }, ...args)
+        console.log('req.body', req.body, raw_input)
+        const args = raw_input ? [req.body] : reshape(req.body)
+        console.log('args', args)
+        // if is crud, this is the provider
+        // if is raw, this is the entity
+        let result: any
+        if (routeMeta.config.action !== 'raw') {
+          result = fn.call(provider, ...args)
+        } else {
+          result = fn.call(entity, ...args)
+        }
 
         res.json(result)
 
@@ -171,9 +219,7 @@ export class FcService {
     }
   }
 
-  private configureParamValidators<T extends new (...args: any[]) => any>(
-    routeMeta,
-  ) {
+  private configureParamValidators(routeMeta: RouteMeta) {
     return Object.values(routeMeta.parameters || {}).map(this.configureParam)
   }
 }
@@ -204,13 +250,15 @@ export class RouterBuilder {
   }
 }
 function createFunction<T extends new (...args: any[]) => any>(
-  routeMeta,
+  routeMeta: RouteMeta,
   entity: T,
   routeName: string,
-  provider: CRUDProvider,
+  provider: CRUDProvider<InstanceType<T>>,
 ) {
   let fn: Function
-  const action = routeMeta.config.action
+  const {
+    config: { action },
+  } = routeMeta
   if (action === 'raw') {
     fn = entity.prototype[routeName] as Function
   } else {

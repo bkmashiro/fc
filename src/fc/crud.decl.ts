@@ -40,7 +40,7 @@ export type UpdateReq<T = unknown> = {
 }
 
 export type DeleteReq<T = unknown> = {
-  row?: unknown
+  row?: T
   [key: string]: any
 }
 
@@ -60,6 +60,6 @@ export type UpdateRes<T = unknown> = {
   rows_affected: number
 }
 
-export type DeleteRes = {
+export type DeleteRes<T = unknown> = {
   rows_affected: number
 }

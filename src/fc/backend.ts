@@ -2,7 +2,6 @@ import 'reflect-metadata'
 import { setMeta, getMeta } from './meta.helper'
 import { Request, Response } from 'express'
 
-
 type Prettify<T> = {
   [K in keyof T]: T[K]
 } & {}
@@ -65,7 +64,7 @@ function collectProps(prototype: Function) {
   return props
 }
 
-function CRUD<C extends { new(...args: any[]): {} }>(
+function CRUD<C extends { new (...args: any[]): {} }>(
   cfg: Record<string, any>,
 ) {
   return function (target: C) {
@@ -76,17 +75,18 @@ function CRUD<C extends { new(...args: any[]): {} }>(
 
 export function Action<
   Act extends 'create' | 'read' | 'update' | 'delete' | 'raw',
-  T extends { new(...args: any[]): {} },
->(
-  path: string,
-  cfg: RouteConfig<T, null, null, 'raw'>,
-  action: Act
-) {
+  T extends { new (...args: any[]): {} },
+>(path: string, cfg: RouteConfig<T, null, null, 'raw'>, action: Act) {
   return function (target: T) {
     setMeta(target, `routes.${path}`, {
       config: { ...cfg, action },
       path,
     })
+
+    // if is crud, add parameters
+    if (action !== 'raw') {
+      setMeta(target, `routes.${path}.config.raw_input`, true)
+    }
   }
 }
 
@@ -134,6 +134,7 @@ type RouteConfig<
 > = {
   method: Method
   action?: Action
+  raw_input?: boolean
   path?: string
   preRoute?(o): void
   transformPayload?(o: Payload<Act, any>): unknown
@@ -283,23 +284,16 @@ export type ParamConfig = {
   validator?: (value: any) => boolean
   name: string
 }
+export type RouteMeta = {
+  path: string
+  config: RouteConfig<any, any, any, any>
+  parameters: Record<string, ParamConfig>
+}
+
 export type CRUDMeta = {
   entity: string
   fields: Record<string, PropConfig<any, any>>
-  routes: Record<
-    string,
-    {
-      path: string
-      config: RouteConfig<any, any, any, any>
-      parameters: Record<string, ParamConfig>
-    }
-  >
+  routes: Record<string, RouteMeta>
 }
 
-export {
-  CRUD,
-  Prop,
-  required,
-  Route,
-  expect,
-}
+export { CRUD, Prop, required, Route, expect }
